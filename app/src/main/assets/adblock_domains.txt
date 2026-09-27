@@ -1,0 +1,89 @@
+doubleclick.net
+googlesyndication.com
+googleadservices.com
+adservice.google.com
+amazon-adsystem.com
+ads.yahoo.com
+
+adnxs.com
+adsrvr.org
+advertising.com
+adform.net
+
+criteo.com
+criteo.net
+scorecardresearch.com
+zedo.com
+
+taboola.com
+outbrain.com
+pubmatic.com
+rubiconproject.com
+openx.net
+casalemedia.com
+sharethrough.com
+33across.com
+quantserve.com
+hotjar.com
+matomo.cloud
+
+# --- 今回のログから追加 ---
+
+# Bance
+bance.jp
+
+# Yicha
+yicha.jp
+
+# AdStir
+ad-stir.com
+
+# JP1 Media
+jp1media.com
+
+# Shinobi
+shinobi.jp
+
+# Ademon
+ademon.net
+
+# ZetaCX
+zetacx.net
+
+# Ad-Nex
+img-ad-nex.com
+
+# SSP系
+glssp.net
+
+ad-nex.com
+banner-ad-nex.com
+lmadps.jp
+dmp.im-apps.net
+blgo18.fans
+blog.livelog.biz
+zeala.link
+
+js.smac-ad.com
+
+js.waqool.com
+edayo.waqool.com
+cs.waqool.com
+
+js.onaxioms.com
+edayo.onaxioms.com
+cs.onaxioms.com
+
+cd.ladsp.com
+px.ladsp.com
+
+cdn.smartnews-ads.com
+i.smartnews-ads.com
+i6.smartnews-ads.com
+
+# i-mobile 広告配信系
+imp-adedge.i-mobile.co.jp
+imp-bidapi.i-mobile.co.jp
+spnativeapi-tls.i-mobile.co.jp
+ssp-sync.i-mobile.co.jp
+
