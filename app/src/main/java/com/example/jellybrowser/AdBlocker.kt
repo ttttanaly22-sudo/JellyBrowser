@@ -117,11 +117,4 @@ object AdBlocker {
         )
     }
 
-    /**
-     * 現在読み込まれている
-     * ブロックドメイン数
-     */
-    fun domainCount(): Int {
-        return blockedDomains.size
-    }
 }

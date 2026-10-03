@@ -5,11 +5,16 @@ import android.content.ContentValues
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.pdf.PdfDocument
+import android.graphics.pdf.PdfRenderer
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import androidx.compose.foundation.rememberScrollState
 import android.util.Log
 import android.webkit.CookieManager
@@ -21,13 +26,13 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -60,11 +65,11 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -86,14 +91,9 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val A4_WIDTH = 595
         private const val A4_HEIGHT = 842
+        private const val MAX_PDF_RENDER_SIZE = 2500
+        private const val STATE_CURRENT_PAGE_URL = "current_page_url"
     }
-
-    data class ImageItem(
-        val url: String,
-        val width: Int,
-        val height: Int,
-        var checked: Boolean = true
-    )
 
     private lateinit var webView: WebView
 
@@ -113,6 +113,20 @@ class MainActivity : ComponentActivity() {
         webView = WebView(this)
 
         setupWebView()
+
+        val restoredWebViewState =
+            savedInstanceState?.let { webView.restoreState(it) }
+
+        val savedPageUrl =
+            savedInstanceState?.getString(STATE_CURRENT_PAGE_URL).orEmpty()
+        currentPageUrl =
+            webView.url
+                ?: restoredWebViewState?.currentItem?.url
+                ?: savedPageUrl
+
+        if (restoredWebViewState == null && savedInstanceState != null && savedPageUrl.isNotBlank()) {
+            webView.loadUrl(savedPageUrl)
+        }
 
         onBackPressedDispatcher.addCallback(
             this,
@@ -134,7 +148,18 @@ class MainActivity : ComponentActivity() {
             JellyBrowserScreen()
         }
 
-        webView.loadUrl("https://www.google.com")
+        if (savedInstanceState == null) {
+            webView.loadUrl("https://www.google.com")
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        webView.saveState(outState)
+        outState.putString(
+            STATE_CURRENT_PAGE_URL,
+            webView.url ?: currentPageUrl
+        )
     }
 
     private fun setupWebView() {
@@ -459,83 +484,11 @@ class MainActivity : ComponentActivity() {
                     downloadPdfBitmap(image.url)
                         ?: continue
 
-                val landscape =
-                    bitmap.width > bitmap.height
-
-                val pageWidth =
-                    if (landscape) {
-                        A4_HEIGHT
-                    } else {
-                        A4_WIDTH
-                    }
-
-                val pageHeight =
-                    if (landscape) {
-                        A4_WIDTH
-                    } else {
-                        A4_HEIGHT
-                    }
-
-                val pageInfo =
-                    PdfDocument.PageInfo.Builder(
-                        pageWidth,
-                        pageHeight,
-                        index + 1
-                    ).create()
-
-                val page =
-                    document.startPage(pageInfo)
-
-                val canvas =
-                    page.canvas
-
-                canvas.drawColor(Color.WHITE)
-
-                val margin =
-                    20f
-
-                val availableWidth =
-                    pageWidth - margin * 2
-
-                val availableHeight =
-                    pageHeight - margin * 2
-
-                val scale =
-                    min(
-                        availableWidth / bitmap.width,
-                        availableHeight / bitmap.height
-                    )
-
-                val drawWidth =
-                    bitmap.width * scale
-
-                val drawHeight =
-                    bitmap.height * scale
-
-                val left =
-                    (pageWidth - drawWidth) / 2f
-
-                val top =
-                    (pageHeight - drawHeight) / 2f
-
-                val dest =
-                    android.graphics.RectF(
-                        left,
-                        top,
-                        left + drawWidth,
-                        top + drawHeight
-                    )
-
-                canvas.drawBitmap(
-                    bitmap,
-                    null,
-                    dest,
-                    null
-                )
-
-                document.finishPage(page)
-
-                bitmap.recycle()
+                try {
+                    addImagePage(document, bitmap)
+                } finally {
+                    bitmap.recycle()
+                }
 
                 onProgress(
                     index + 1,
@@ -603,6 +556,225 @@ class MainActivity : ComponentActivity() {
 
         } finally {
             document.close()
+        }
+    }
+
+    /** Adds one image on a centered A4 page while preserving its aspect ratio. */
+    private fun addImagePage(
+        document: PdfDocument,
+        bitmap: Bitmap
+    ) {
+        val landscape = bitmap.width > bitmap.height
+        val pageWidth = if (landscape) A4_HEIGHT else A4_WIDTH
+        val pageHeight = if (landscape) A4_WIDTH else A4_HEIGHT
+        val pageInfo = PdfDocument.PageInfo.Builder(
+            pageWidth,
+            pageHeight,
+            document.pages.size + 1
+        ).create()
+        val page = document.startPage(pageInfo)
+
+        try {
+            page.canvas.drawColor(Color.WHITE)
+
+            val margin = 20f
+            val availableWidth = pageWidth - margin * 2
+            val availableHeight = pageHeight - margin * 2
+            val scale = min(
+                availableWidth / bitmap.width,
+                availableHeight / bitmap.height
+            )
+            val drawWidth = bitmap.width * scale
+            val drawHeight = bitmap.height * scale
+            val left = (pageWidth - drawWidth) / 2f
+            val top = (pageHeight - drawHeight) / 2f
+            val destination = android.graphics.RectF(
+                left,
+                top,
+                left + drawWidth,
+                top + drawHeight
+            )
+
+            page.canvas.drawBitmap(bitmap, null, destination, null)
+        } finally {
+            document.finishPage(page)
+        }
+    }
+
+    /** Copies existing PDF pages first, then appends the selected images. */
+    private fun appendImagesToPdf(
+        sourceUri: Uri,
+        sourceName: String,
+        images: List<PageImage>,
+        onProgress: (String) -> Unit
+    ): String? {
+        if (images.isEmpty()) return null
+
+        val document = PdfDocument()
+        var sourceFile: ParcelFileDescriptor? = null
+
+        try {
+            sourceFile = contentResolver.openFileDescriptor(sourceUri, "r")
+                ?: throw IllegalStateException("PDFファイルを開けません")
+            val renderer = PdfRenderer(sourceFile)
+
+            try {
+                for (index in 0 until renderer.pageCount) {
+                    val sourcePage = renderer.openPage(index)
+                    var bitmap: Bitmap? = null
+
+                    try {
+                        val pageWidth = sourcePage.width
+                        val pageHeight = sourcePage.height
+                        require(pageWidth > 0 && pageHeight > 0) {
+                            "PDFページのサイズが不正です"
+                        }
+
+                        val renderScale = min(
+                            1f,
+                            MAX_PDF_RENDER_SIZE.toFloat() /
+                                maxOf(pageWidth, pageHeight)
+                        )
+                        val bitmapWidth = (pageWidth * renderScale).toInt().coerceAtLeast(1)
+                        val bitmapHeight = (pageHeight * renderScale).toInt().coerceAtLeast(1)
+                        bitmap = Bitmap.createBitmap(
+                            bitmapWidth,
+                            bitmapHeight,
+                            Bitmap.Config.ARGB_8888
+                        )
+                        bitmap.eraseColor(Color.WHITE)
+
+                        val matrix = Matrix().apply {
+                            setScale(renderScale, renderScale)
+                        }
+                        sourcePage.render(
+                            bitmap,
+                            null,
+                            matrix,
+                            PdfRenderer.Page.RENDER_MODE_FOR_PRINT
+                        )
+
+                        val outputPage = document.startPage(
+                            PdfDocument.PageInfo.Builder(
+                                pageWidth,
+                                pageHeight,
+                                document.pages.size + 1
+                            ).create()
+                        )
+                        try {
+                            outputPage.canvas.drawBitmap(
+                                bitmap,
+                                null,
+                                android.graphics.RectF(
+                                    0f,
+                                    0f,
+                                    pageWidth.toFloat(),
+                                    pageHeight.toFloat()
+                                ),
+                                null
+                            )
+                        } finally {
+                            document.finishPage(outputPage)
+                        }
+                        onProgress("既存PDF ${index + 1} / ${renderer.pageCount}")
+                    } finally {
+                        bitmap?.recycle()
+                        sourcePage.close()
+                    }
+                }
+            } finally {
+                renderer.close()
+            }
+
+            for ((index, image) in images.withIndex()) {
+                val bitmap = downloadPdfBitmap(image.url)
+                    ?: throw IllegalStateException("画像を取得できませんでした")
+                try {
+                    addImagePage(document, bitmap)
+                } finally {
+                    bitmap.recycle()
+                }
+                onProgress("画像 ${index + 1} / ${images.size}")
+            }
+
+            return savePdfWithoutOverwrite(document, sourceName)
+        } catch (e: Exception) {
+            Log.e("PDF_APPEND", "PDFへの画像追加に失敗しました", e)
+            return null
+        } finally {
+            sourceFile?.close()
+            document.close()
+        }
+    }
+
+    /** Saves as name_追加.pdf and chooses a free name when it already exists. */
+    private fun savePdfWithoutOverwrite(
+        document: PdfDocument,
+        sourceName: String
+    ): String? {
+        val baseName = sourceName
+            .substringBeforeLast('.', sourceName)
+            .ifBlank { "document" }
+        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/JellyBrowser/"
+        val resolver = contentResolver
+        var suffix = 0
+
+        while (suffix < Int.MAX_VALUE) {
+            val extra = if (suffix == 0) "" else "_$suffix"
+            val outputName = "${baseName}_追加$extra.pdf"
+            val exists = resolver.query(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.Downloads._ID),
+                "${MediaStore.Downloads.DISPLAY_NAME} = ? AND ${MediaStore.Downloads.RELATIVE_PATH} = ?",
+                arrayOf(outputName, relativePath),
+                null
+            )?.use { it.moveToFirst() } ?: false
+
+            if (!exists) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, outputName)
+                    put(MediaStore.Downloads.MIME_TYPE, "application/pdf")
+                    put(MediaStore.Downloads.RELATIVE_PATH, relativePath)
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val outputUri = resolver.insert(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    values
+                ) ?: return null
+
+                try {
+                    resolver.openOutputStream(outputUri)?.use { output ->
+                        document.writeTo(output)
+                    } ?: throw IllegalStateException("保存先を開けません")
+                    val published = ContentValues().apply {
+                        put(MediaStore.Downloads.IS_PENDING, 0)
+                    }
+                    resolver.update(outputUri, published, null, null)
+                    return outputName
+                } catch (e: Exception) {
+                    resolver.delete(outputUri, null, null)
+                    throw e
+                }
+            }
+            suffix++
+        }
+        return null
+    }
+
+    private fun getPdfDisplayName(uri: Uri): String {
+        return try {
+            contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) else null
+            } ?: uri.lastPathSegment ?: "PDF"
+        } catch (e: Exception) {
+            Log.w("PDF_PICKER", "PDF名を取得できません", e)
+            uri.lastPathSegment ?: "PDF"
         }
     }
 
@@ -757,143 +929,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun downloadThumbnail(
-        imageUrl: String
-    ): Bitmap? {
-
-        var connection: HttpURLConnection? = null
-
-        return try {
-
-            connection =
-                URL(imageUrl)
-                    .openConnection()
-                        as HttpURLConnection
-
-            connection.instanceFollowRedirects = true
-
-            connection.connectTimeout =
-                10_000
-
-            connection.readTimeout =
-                10_000
-
-            connection.setRequestProperty(
-                "User-Agent",
-                WebSettings.getDefaultUserAgent(this)
-            )
-
-            val cookie =
-                CookieManager
-                    .getInstance()
-                    .getCookie(imageUrl)
-
-            if (!cookie.isNullOrBlank()) {
-
-                connection.setRequestProperty(
-                    "Cookie",
-                    cookie
-                )
-            }
-
-            connection.setRequestProperty(
-                "Referer",
-                currentPageUrl
-            )
-
-            connection.connect()
-
-            if (
-                connection.responseCode !in 200..299
-            ) {
-                return null
-            }
-
-            connection.inputStream.use {
-                BitmapFactory.decodeStream(it)
-            }
-
-        } catch (e: Exception) {
-
-            Log.e(
-                "THUMB",
-                "サムネイル取得失敗",
-                e
-            )
-
-            null
-
-        } finally {
-            connection?.disconnect()
-        }
-    }
-
-    @Composable
-    fun ImageList(
-        images: List<PageImage>,
-        modifier: Modifier = Modifier
-    ){
-
-        LazyColumn(
-            modifier = modifier
-        ) {
-
-            items(images) { img ->
-
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(4.dp)
-                ) {
-
-                    Row(
-                        verticalAlignment =
-                            Alignment.CenterVertically,
-                        modifier =
-                            Modifier.padding(4.dp)
-                    ) {
-
-                        AsyncImage(
-                            model = img.url,
-                            contentDescription = null,
-                            modifier =
-                                Modifier.size(80.dp)
-                        )
-
-                        Spacer(
-                            modifier =
-                                Modifier.width(8.dp)
-                        )
-
-                        Column(
-                            modifier =
-                                Modifier.weight(1f)
-                        ) {
-
-                            Text(
-                                text =
-                                    img.url.substringAfterLast("/")
-                            )
-
-                            Text(
-                                text =
-                                    "${img.width} x ${img.height}",
-                                style =
-                                    MaterialTheme.typography.bodySmall
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     @Composable
     private fun JellyBrowserScreen() {
 
         var urlText by remember {
             mutableStateOf(
-                "https://www.google.com"
+                currentPageUrl.ifBlank { "https://www.google.com" }
             )
         }
 
@@ -931,6 +972,50 @@ class MainActivity : ComponentActivity() {
 
         var pdfProgress by remember {
             mutableStateOf("")
+        }
+
+        val pdfPreferences = remember {
+            getSharedPreferences("pdf_append_selection", MODE_PRIVATE)
+        }
+        var selectedPdfUri by rememberSaveable {
+            mutableStateOf(pdfPreferences.getString("uri", null))
+        }
+        var selectedPdfName by rememberSaveable {
+            mutableStateOf(pdfPreferences.getString("name", null))
+        }
+
+        var appendToExistingPdf by rememberSaveable {
+            mutableStateOf(false)
+        }
+
+        val pdfPicker = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.OpenDocument()
+        ) { uri ->
+            if (uri != null) {
+                val persisted = try {
+                    contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                    true
+                } catch (e: Exception) {
+                    // Some document providers do not offer persistable grants.
+                    Log.w("PDF_PICKER", "PDFアクセス権を保持できません", e)
+                    false
+                }
+                selectedPdfUri = uri.toString()
+                selectedPdfName = getPdfDisplayName(uri)
+                pdfPreferences.edit().apply {
+                    if (persisted) {
+                        putString("uri", selectedPdfUri)
+                        putString("name", selectedPdfName)
+                    } else {
+                        remove("uri")
+                        remove("name")
+                    }
+                }.apply()
+                pdfProgress = "PDFを選択しました"
+            }
         }
 
         var imageCount by remember {
@@ -1072,52 +1157,71 @@ class MainActivity : ComponentActivity() {
                             pdfRunning,
                         pdfProgress =
                             pdfProgress,
+                        selectedPdfName =
+                            selectedPdfName,
+                        appendToExistingPdf =
+                            appendToExistingPdf,
+                        onAppendModeChange = {
+                            appendToExistingPdf = it
+                        },
+                        onChoosePdf = {
+                            pdfPicker.launch(arrayOf("application/pdf"))
+                        },
                         onCreatePdf = {
 
                             val selected =
                                 getSelectedImages()
 
-                            if (
-                                selected.isEmpty()
-                            ) {
+                            if (selected.isEmpty()) {
                                 pdfProgress =
                                     "選択画像がありません"
                                 return@ControlPanel
                             }
 
+                            if (appendToExistingPdf && selectedPdfUri == null) {
+                                pdfProgress = "追加するPDFを選択してください"
+                                return@ControlPanel
+                            }
+
                             pdfRunning = true
-                            pdfProgress =
+                            pdfProgress = if (appendToExistingPdf) {
+                                "PDFを読み込んでいます"
+                            } else {
                                 "0 / ${selected.size}"
+                            }
 
                             scope.launch {
-
-                                val result =
-                                    withContext(
-                                        Dispatchers.IO
-                                    ) {
-
-                                        createPdf(
-                                            selected,
-                                            pdfName
-                                        ) { current, total ->
-
-                                            runOnUiThread {
-
-                                                pdfProgress =
-                                                    "$current / $total"
+                                try {
+                                    val result = withContext(Dispatchers.IO) {
+                                        if (appendToExistingPdf) {
+                                            appendImagesToPdf(
+                                                Uri.parse(requireNotNull(selectedPdfUri)),
+                                                selectedPdfName ?: "document.pdf",
+                                                selected
+                                            ) { progress ->
+                                                runOnUiThread {
+                                                    pdfProgress = progress
+                                                }
+                                            }
+                                        } else {
+                                            createPdf(selected, pdfName) { current, total ->
+                                                runOnUiThread {
+                                                    pdfProgress = "画像 $current / $total"
+                                                }
                                             }
                                         }
                                     }
-
-                                pdfRunning =
-                                    false
-
-                                pdfProgress =
-                                    if (result != null) {
+                                    pdfProgress = if (result != null) {
                                         "完了: $result"
                                     } else {
-                                        "PDF作成に失敗しました"
+                                        "PDF作成に失敗しました。ファイルとアクセス権を確認してください"
                                     }
+                                } catch (e: Exception) {
+                                    Log.e("PDF", "PDF作成に失敗しました", e)
+                                    pdfProgress = "PDFを開けないか、保存できませんでした"
+                                } finally {
+                                    pdfRunning = false
+                                }
                             }
                         },
                         onClose = {
@@ -1179,6 +1283,10 @@ class MainActivity : ComponentActivity() {
         onPdfNameChange: (String) -> Unit,
         pdfRunning: Boolean,
         pdfProgress: String,
+        selectedPdfName: String?,
+        appendToExistingPdf: Boolean,
+        onAppendModeChange: (Boolean) -> Unit,
+        onChoosePdf: () -> Unit,
         onCreatePdf: () -> Unit,
         onClose: () -> Unit,
         images: List<PageImage>,
@@ -1481,6 +1589,42 @@ class MainActivity : ComponentActivity() {
                             "PDF作成"
                         }
                     )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = appendToExistingPdf,
+                    onCheckedChange = onAppendModeChange,
+                    enabled = !pdfRunning
+                )
+                Text(
+                    text = "PDF追加",
+                    modifier = Modifier.padding(end = 8.dp),
+                    color = if (appendToExistingPdf) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    }
+                )
+                Text(
+                    text = selectedPdfName ?: "PDF未選択",
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    color = if (appendToExistingPdf) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    }
+                )
+                TextButton(
+                    onClick = onChoosePdf,
+                    enabled = appendToExistingPdf && !pdfRunning
+                ) {
+                    Text(if (selectedPdfName == null) "選択" else "変更")
                 }
             }
 
